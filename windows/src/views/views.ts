@@ -69,6 +69,25 @@ function agentWho(task: AgentTask | null, label: string): HTMLElement {
   return row;
 }
 
+/**
+ * "Claude Code finished" was a literal, so a Hermes turn finished while the card
+ * claimed it was Claude Code. These labels describe the agent that produced the
+ * event, so they follow `task.source`.
+ *
+ * An external agent's `task.name` already is that agent ("Hermes") and is printed
+ * beside the label by `agentWho`, so it gets the bare verb: "● Hermes finished".
+ * Claude Code and n8n spell their agent out because their `task.name` is a project
+ * ("VS Code") rather than the agent itself.
+ */
+function whoName(task: AgentTask | null): string {
+  if (task?.source === "agent") return task.name;
+  return task?.source === "n8n" ? "n8n" : "Claude Code";
+}
+
+function whoLabel(task: AgentTask | null, verb: string): string {
+  return task?.source === "agent" ? verb : `${whoName(task)} ${verb}`;
+}
+
 function stack(padLeft: number, padRight: number, ...children: Node[]): HTMLElement {
   const el = h("div", { class: "stack" }, ...children);
   el.style.padding = `4px ${padRight}px 4px ${padLeft}px`;
@@ -328,7 +347,7 @@ function buildQuestion(): ViewHost {
     el,
     sync() {
       clear(who);
-      who.append(agentWho(State.focusTask, "Claude Code is asking a question"));
+      who.append(agentWho(State.focusTask, whoLabel(State.focusTask, "is asking a question")));
       const task = State.focusTask;
       title.textContent = task?.steps.at(-1) ?? "Claude needs an answer.";
       clear(row);
@@ -353,7 +372,7 @@ function buildError(actions: ViewActions): ViewHost {
     sync() {
       const task = State.focusTask;
       clear(who);
-      who.append(agentWho(task, task?.source === "n8n" ? "n8n" : "Claude Code"));
+      who.append(agentWho(task, whoName(task)));
       title.textContent = task?.source === "n8n" ? "Workflow stopped." : "Session stopped on an error.";
       detail.textContent = task?.steps.at(-1) ?? "No detail available.";
     },
@@ -374,7 +393,7 @@ function buildFinished(actions: ViewActions): ViewHost {
     el,
     sync() {
       clear(who);
-      who.append(agentWho(State.focusTask, "Claude Code finished"));
+      who.append(agentWho(State.focusTask, whoLabel(State.focusTask, "finished")));
       title.textContent = State.focusTask?.steps.at(-1) ?? "Session finished";
     },
   };

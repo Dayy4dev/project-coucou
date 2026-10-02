@@ -34,6 +34,14 @@ function validateAgent(raw: string | undefined): string | null {
   return raw;
 }
 
+/** "hermes" -> "Hermes", "my-agent" -> "My Agent": display form of an agent tag. */
+function titleCase(slug: string): string {
+  return slug
+    .split("-")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
 const FALLBACK_COLORS = ["#22C55E", "#EAB308", "#60A5FA", "#E879F9"];
 
 function agentColor(name: string): string {
@@ -176,7 +184,9 @@ function handleHook(island: Island, payload: HookPayload) {
   /** Ensure the agent pill exists (no-op for Claude Code). */
   const ensurePill = () => {
     if (isExternalAgent) {
-      State.upsertExternalAgent(agentId, validAgent!, agentColor(validAgent!));
+      // The tag is a lowercase slug ("hermes") because that is what validateAgent
+      // accepts; capitalise it for display, since task.name is only ever rendered.
+      State.upsertExternalAgent(agentId, titleCase(validAgent!), agentColor(validAgent!));
     } else {
       upsert(projectName, cwd);
     }
