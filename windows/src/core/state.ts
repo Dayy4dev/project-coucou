@@ -6,6 +6,9 @@ import type { EyeShape } from "../mochi/engine";
 export type AgentSource = "claudeCode" | "n8n" | "agent";
 export type PillBadge = "approval" | "finished" | "error";
 
+/** Views that describe one task's outcome and must not outlive that task. */
+const ALERT_VIEWS: ReadonlySet<IslandViewName> = new Set(["approval", "question", "error", "finished"]);
+
 export interface AgentTask {
   id: string;
   name: string;
@@ -231,8 +234,17 @@ class AppState {
   removeTask(id: string) {
     const idx = this.tasks.findIndex((t) => t.id === id);
     if (idx < 0) return;
+    const wasFocused = this.focusId === id;
     this.tasks.splice(idx, 1);
-    if (this.focusId === id) this.focusId = this.tasks[0]?.id ?? "integration_claude";
+    if (wasFocused) {
+      this.focusId = this.tasks[0]?.id ?? "integration_claude";
+      // macOS calls syncView() here. Without it the island kept rendering the
+      // removed task's card against whoever is focused now: a finished Hermes
+      // turn whose card had just been retired reappeared as "Claude Code
+      // finished / Session finished". A task-bound alert view cannot outlive its
+      // task, so fall back to the overview.
+      if (ALERT_VIEWS.has(this.view)) this.view = this.defaultView();
+    }
     this.notify();
   }
 
