@@ -364,9 +364,19 @@ fn parse_shortcut(s: &str) -> Option<(HOT_KEY_MODIFIERS, u32)> {
 /// `update_global_hotkey`.
 pub fn init_global_hotkey(app: AppHandle, enabled: bool, shortcut: String) {
     let (tx, rx) = std::sync::mpsc::channel::<(bool, String)>();
-    let thread_id = unsafe { GetCurrentThreadId() };
+
+    // Publish the sender before the thread runs, so a preference change arriving
+    // during startup is queued instead of dropped. thread_id stays 0 until the
+    // thread itself fills it in: PostThreadMessageW must target the hotkey
+    // thread's own queue, and the caller's thread id would wake the wrong one.
+    *HOTKEY.lock().unwrap() = Some(HotkeyState { tx, thread_id: 0 });
 
     std::thread::spawn(move || {
+        let thread_id = unsafe { GetCurrentThreadId() };
+        if let Some(state) = HOTKEY.lock().unwrap().as_mut() {
+            state.thread_id = thread_id;
+        }
+
         let mut registered: Option<i32> = None;
         const HOTKEY_ID: i32 = 1010;
 
@@ -379,12 +389,17 @@ pub fn init_global_hotkey(app: AppHandle, enabled: bool, shortcut: String) {
             if en {
                 if let Some((mods, vk)) = parse_shortcut(sc) {
                     match unsafe { RegisterHotKey(None, HOTKEY_ID, mods, vk) } {
-                        Ok(()) => registered = Some(HOTKEY_ID),
+                        Ok(()) => {
+                            registered = Some(HOTKEY_ID);
+                            crate::log::line(format!("hotkey {sc} registered"));
+                        }
                         Err(err) => crate::log::line(format!("hotkey {sc} unavailable: {err}")),
                     }
                 } else {
                     crate::log::line(format!("hotkey {sc} could not be parsed"));
                 }
+            } else if registered.is_none() {
+                crate::log::line("hotkey disabled");
             }
         };
 
@@ -415,8 +430,6 @@ pub fn init_global_hotkey(app: AppHandle, enabled: bool, shortcut: String) {
             }
         }
     });
-
-    *HOTKEY.lock().unwrap() = Some(HotkeyState { tx, thread_id });
 }
 
 /// Applies a preference change to the already-running hotkey thread.
