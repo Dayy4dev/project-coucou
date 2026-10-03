@@ -22,6 +22,13 @@ export interface AgentTask {
   miniEye?: EyeShape | null;
   pillBadge?: PillBadge | null;
   sessionCwd?: string | null;
+  /**
+   * Which surface an external agent's session is running on: "terminal" (CLI)
+   * or "desktop" (Hermes Desktop). Sent by the hook bridge as `coucou_surface`
+   * and drives the finished card's primary button — open a terminal window, or
+   * bring the desktop app forward. Absent for Claude Code and integrations.
+   */
+  surface?: "desktop" | "terminal" | null;
 }
 
 export interface ApprovalInfo {
@@ -199,6 +206,14 @@ class AppState {
     const t = this.tasks.find((x) => x.id === id);
     if (!t) return;
     t.pillBadge = badge;
+    this.notify();
+  }
+
+  /** Records which surface (terminal/desktop) an agent's session runs on. */
+  setTaskSurface(id: string, surface: "desktop" | "terminal") {
+    const t = this.tasks.find((x) => x.id === id);
+    if (!t || t.surface === surface) return;
+    t.surface = surface;
     this.notify();
   }
 

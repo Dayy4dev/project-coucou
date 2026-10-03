@@ -384,8 +384,9 @@ function buildError(actions: ViewActions): ViewHost {
 function buildFinished(actions: ViewActions): ViewHost {
   const who = h("div");
   const title = h("div", { class: "title" });
+  const primary = btn("Open terminal", "primary", () => actions.openTerminal());
   const row = h("div", { class: "actions" },
-    btn("Open terminal", "primary", () => actions.openTerminal()),
+    primary,
     btn("OK", "secondary", () => actions.collapse()),
   );
   const el = h("div", { class: "view" }, card("green", stack(116, 16, who, title, row)));
@@ -395,6 +396,12 @@ function buildFinished(actions: ViewActions): ViewHost {
       clear(who);
       who.append(agentWho(State.focusTask, whoLabel(State.focusTask, "finished")));
       title.textContent = State.focusTask?.steps.at(-1) ?? "Session finished";
+      // The button opens where the session actually lives. Hermes Desktop has
+      // its own window to raise; a CLI session opens a terminal. Everything
+      // else (Claude Code, integrations) keeps "Open terminal" → VS Code.
+      const label = State.focusTask?.surface === "desktop" ? "Open Hermes" : "Open terminal";
+      const span = primary.querySelector("span");
+      if (span && span.textContent !== label) span.textContent = label;
     },
   };
 }

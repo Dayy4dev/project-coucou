@@ -284,6 +284,12 @@ pub fn set_input_region(win: &WebviewWindow, rect: Region) {
     apply_input_region(&gw, rect);
 }
 
+/// Linux has no portable "raise another app's window" API; the caller falls
+/// back to opening a terminal. Always reports failure.
+pub fn focus_external_window(_title_substring: &str) -> bool {
+    false
+}
+
 fn apply_input_region(gw: &impl IsA<gtk::Widget>, rect: Region) {
     match rect {
         None => gw.input_shape_combine_region(None),

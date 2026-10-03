@@ -112,8 +112,14 @@ export class Island {
         Sound.play("blip");
       },
       openTerminal: () => {
-        const cwd = State.focusTask?.sessionCwd ?? null;
-        void Bridge.openInVSCode(cwd);
+        const task = State.focusTask;
+        const cwd = task?.sessionCwd ?? null;
+        // An external agent's session lives somewhere specific: Hermes Desktop
+        // runs in its own window, a CLI session in a terminal. The finished
+        // card's button follows that surface instead of always opening VS Code.
+        if (task?.surface === "desktop") void Bridge.openAgentSurface("desktop", cwd);
+        else if (task?.surface === "terminal") void Bridge.openAgentSurface("terminal", cwd);
+        else void Bridge.openInVSCode(cwd);
       },
       // The ↗ button — same targets as openAgentTarget() on macOS.
       openTarget: () => {

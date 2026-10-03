@@ -25,6 +25,8 @@ interface HookPayload {
   tool_input?: Record<string, unknown>;
   /** Optional agent tag: lowercase, digits and hyphens, ≤ 24 chars. */
   coucou_agent?: string;
+  /** "terminal" (CLI) or "desktop" (Hermes Desktop app) */
+  coucou_surface?: "desktop" | "terminal" | string;
 }
 
 /** Same rule as HookServer.validateAgent on macOS. "claude" is reserved. */
@@ -224,6 +226,9 @@ function handleHook(island: Island, payload: HookPayload) {
       // The tag is a lowercase slug ("hermes") because that is what validateAgent
       // accepts; capitalise it for display, since task.name is only ever rendered.
       State.upsertExternalAgent(agentId, titleCase(validAgent!), agentColor(validAgent!));
+      if (payload.coucou_surface === "desktop" || payload.coucou_surface === "terminal") {
+        State.setTaskSurface(agentId, payload.coucou_surface);
+      }
     } else {
       upsert(projectName, cwd);
     }

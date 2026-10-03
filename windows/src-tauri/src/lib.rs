@@ -165,11 +165,31 @@ fn open_in_vscode(path: Option<String>) -> bool {
     false
 }
 
+/// Bring an external agent's own surface to the front. `surface` is the tag the
+/// hook bridge sends (`coucou_surface`): "desktop" for Hermes Desktop, anything
+/// else for a terminal session. Returns false when nothing could be focused, so
+/// the caller can fall back to opening a terminal.
+#[tauri::command]
+fn open_agent_surface(surface: String, path: Option<String>) -> bool {
+    match surface.as_str() {
+        "desktop" => {
+            // Hermes Desktop's window title is "Hermes"; the app is Electron, so
+            // raising the top-level window is enough to restore it from a
+            // minimised or background state.
+            platform::focus_external_window("hermes")
+        }
+        _ => {
+            // A terminal session: opening the project folder in VS Code is the
+            // same behaviour as Claude Code's "Open terminal" button.
+            open_in_vscode(path)
+        }
+    }
+}
+
 #[tauri::command]
 fn quit_app(app: AppHandle) {
     app.exit(0);
 }
-
 /// Tray → Pause. Paused means paused: the pollers stop talking to the network,
 /// not just the island stopping showing things.
 #[tauri::command]
@@ -383,6 +403,7 @@ pub fn run() {
             reposition,
             open_url,
             open_in_vscode,
+            open_agent_surface,
             quit_app,
             hooks_status,
             hooks_preview,

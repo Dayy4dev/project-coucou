@@ -161,6 +161,16 @@ def build_payload(hermes):
     ):
         payload["hook_event_name"] = "StopFailure"
 
+    # Tell Coucou which surface Hermes is running on so it can adapt the
+    # "Open terminal" / "Open Hermes" button on the finished card.
+    # HERMES_SESSION_SOURCE is "desktop" when run from the Electron app, "cli"
+    # or absent from a terminal session. HERMES_DESKTOP=1 is the legacy flag.
+    source = os.environ.get("HERMES_SESSION_SOURCE", "").lower()
+    if source == "desktop" or os.environ.get("HERMES_DESKTOP") == "1":
+        payload["coucou_surface"] = "desktop"
+    else:
+        payload["coucou_surface"] = "terminal"
+
     return payload
 
 

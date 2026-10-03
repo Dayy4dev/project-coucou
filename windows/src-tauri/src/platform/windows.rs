@@ -233,3 +233,54 @@ pub fn set_activating(win: &WebviewWindow, activating: bool) {
 
 /// Click-through here is the poll's WS_EX_TRANSPARENT toggle, not a region.
 pub fn set_input_region(_win: &WebviewWindow, _rect: Option<(f64, f64, f64, f64)>) {}
+
+/// Bring an external window (e.g. Hermes Desktop) to the front.
+pub fn focus_external_window(title_substring: &str) -> bool {
+    use ::windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible, SetForegroundWindow,
+        ShowWindow, SW_RESTORE,
+    };
+
+    struct FindState {
+        needle: String,
+        found_hwnd: Option<HWND>,
+    }
+
+    let mut state = FindState {
+        needle: title_substring.to_lowercase(),
+        found_hwnd: None,
+    };
+
+    unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let state = &mut *(lparam.0 as *mut FindState);
+        if !IsWindowVisible(hwnd).as_bool() {
+            return true.into();
+        }
+        let len = GetWindowTextLengthW(hwnd);
+        if len > 0 {
+            let mut buf = vec![0u16; (len + 1) as usize];
+            let read = GetWindowTextW(hwnd, &mut buf);
+            if read > 0 {
+                let title = String::from_utf16_lossy(&buf[..read as usize]).to_lowercase();
+                if title.contains(&state.needle) {
+                    state.found_hwnd = Some(hwnd);
+                    return false.into(); // stop search
+                }
+            }
+        }
+        true.into()
+    }
+
+    unsafe {
+        let _ = EnumWindows(
+            Some(enum_cb),
+            LPARAM(&mut state as *mut FindState as isize),
+        );
+        if let Some(hwnd) = state.found_hwnd {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+            let _ = SetForegroundWindow(hwnd);
+            return true;
+        }
+    }
+    false
+}
