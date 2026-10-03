@@ -102,7 +102,18 @@ export interface Settings {
   hooksInstalled: boolean;
   /** Claude model used by the chat. */
   model: string;
+  /** Global keyboard shortcut that opens/closes the island. */
+  hotkeyEnabled: boolean;
+  /** e.g. "Ctrl+Shift+C", "Alt+C", "Ctrl+Shift+Space". */
+  hotkey: string;
+  /** What a right-click on the island does. */
+  rightClickAction: MouseAction;
+  /** What a middle-click on the island does. */
+  middleClickAction: MouseAction;
 }
+
+/** A mouse gesture on the island: toggle it, only close it, or do nothing. */
+export type MouseAction = "toggle" | "hide" | "none";
 
 export const DEFAULT_SETTINGS: Settings = {
   soundEnabled: true,
@@ -116,6 +127,11 @@ export const DEFAULT_SETTINGS: Settings = {
   autostart: false,
   hooksInstalled: false,
   model: "claude-opus-5",
+  // A global hotkey is a machine-wide claim: off until the user asks for it.
+  hotkeyEnabled: false,
+  hotkey: "Ctrl+Shift+C",
+  rightClickAction: "toggle",
+  middleClickAction: "hide",
 };
 
 type Listener = () => void;
@@ -292,6 +308,14 @@ class AppState {
 
   defaultView(): IslandViewName {
     return this.tasks.length === 0 ? "empty" : "overview";
+  }
+
+  /**
+   * True while the island is showing anything at all — the shared meaning of
+   * "open" for the hotkey and the mouse gestures.
+   */
+  get isOpen(): boolean {
+    return this.mode !== "hidden";
   }
 }
 

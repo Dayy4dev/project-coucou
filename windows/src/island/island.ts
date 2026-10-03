@@ -10,7 +10,7 @@ import {
   type IslandMode, type IslandViewName,
 } from "../core/layout";
 import { Sound } from "../core/sound";
-import { State } from "../core/state";
+import { State, type MouseAction } from "../core/state";
 import { BotEngine, hexToRGB } from "../mochi/engine";
 import { Greeting } from "../mochi/greeting";
 import { createMiniBot, pruneMiniBots, syncMiniBotStates, tickMiniBots } from "../mochi/minibots";
@@ -340,6 +340,37 @@ export class Island {
     this.fsm.reveal();
   }
 
+  /**
+   * Hotkey and mouse gestures all mean the same thing: if the island is showing
+   * (compact or expanded), close it all the way down to the wake strip; if it is
+   * closed, open it on the default view. Deliberately not `collapse()` — that
+   * leaves the compact pill on screen, which is not what "close" means here.
+   */
+  toggleOpen() {
+    if (State.mode === "hidden") this.openIsland();
+    else this.closeIsland();
+  }
+
+  /** Open the island on the default view (overview, or empty). */
+  openIsland() {
+    Sound.resume();
+    this.alert(State.defaultView());
+  }
+
+  /** Close completely — down to the invisible wake strip. */
+  closeIsland() {
+    State.isPinned = false;
+    this.fsm.pinned = false;
+    this.fsm.forceHidden();
+  }
+
+  /** Runs the configured right-click / middle-click gesture. */
+  private applyMouseAction(action: MouseAction) {
+    if (action === "toggle") this.toggleOpen();
+    else if (action === "hide") this.closeIsland();
+    // "none": the gesture is deliberately inert.
+  }
+
   /** An alert stopped waiting for an answer: let the island auto-close again. */
   dropPin() {
     this.fsm.pinned = false;
@@ -537,7 +568,32 @@ export class Island {
       if (State.mode === "hidden") this.fsm.mouseEntered();
     });
 
+    this.wakeStrip.addEventListener("click", () => {
+      Sound.resume();
+      if (State.mode === "hidden") this.openIsland();
+    });
+
+    // Right-click on the island: configurable gesture (default: toggle).
+    // Always prevents the default browser context menu.
+    this.islandEl.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      Sound.resume();
+      State.lastActivity = performance.now();
+      this.applyMouseAction(State.settings.rightClickAction);
+    });
+
+    // Middle-click on the island: configurable gesture (default: hide).
+    this.islandEl.addEventListener("auxclick", (e) => {
+      if (e.button === 1) {
+        e.preventDefault();
+        Sound.resume();
+        State.lastActivity = performance.now();
+        this.applyMouseAction(State.settings.middleClickAction);
+      }
+    });
+
     this.islandEl.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return; // Right-click and middle-click handled above
       Sound.resume();
       State.lastActivity = performance.now();
       if (State.mode !== "expanded") {

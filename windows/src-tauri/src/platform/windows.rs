@@ -4,19 +4,27 @@ use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 
-use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
 use ::windows::core::{BOOL, PWSTR};
-use ::windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, HWND, LPARAM, LocalFree, POINT};
+use ::windows::Win32::Foundation::{
+    CloseHandle, LocalFree, HANDLE, HLOCAL, HWND, LPARAM, POINT, WPARAM,
+};
 use ::windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use ::windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
 use ::windows::Win32::System::Ole::RevokeDragDrop;
 use ::windows::Win32::System::SystemInformation::GetLocalTime;
-use ::windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-use ::windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+use ::windows::Win32::System::Threading::{
+    GetCurrentProcess, GetCurrentThreadId, OpenProcessToken,
+};
+use ::windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL,
+    MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VK_LBUTTON, VK_SPACE,
+};
 use ::windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, GetClassNameW, GetCursorPos, GetWindowLongPtrW, SetWindowLongPtrW,
-    GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    DispatchMessageW, EnumChildWindows, GetClassNameW, GetCursorPos, GetMessageW,
+    GetWindowLongPtrW, PostThreadMessageW, SetWindowLongPtrW, TranslateMessage, GWL_EXSTYLE, MSG,
+    WM_APP, WM_HOTKEY, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 
 use super::LocalTime;
@@ -77,8 +85,8 @@ pub fn no_console(cmd: &mut Command) -> &mut Command {
 }
 
 pub fn open_url(url: &str) {
-    let _ = no_console(Command::new("rundll32.exe").args(["url.dll,FileProtocolHandler", url]))
-        .spawn();
+    let _ =
+        no_console(Command::new("rundll32.exe").args(["url.dll,FileProtocolHandler", url])).spawn();
 }
 
 pub fn reveal_folder(path: &str) {
@@ -186,7 +194,9 @@ fn hwnd_of(win: &WebviewWindow) -> Option<HWND> {
 /// Cheap and idempotent, so it is simply re-run whenever a drag might be starting.
 pub fn unblock_webview_drops(app: &AppHandle) {
     for label in [WINDOW_LABEL, "settings"] {
-        let Some(win) = app.get_webview_window(label) else { continue };
+        let Some(win) = app.get_webview_window(label) else {
+            continue;
+        };
         let Some(hwnd) = hwnd_of(&win) else { continue };
         unsafe {
             let _ = EnumChildWindows(Some(hwnd), Some(revoke_render_widget), LPARAM(0));
@@ -272,10 +282,7 @@ pub fn focus_external_window(title_substring: &str) -> bool {
     }
 
     unsafe {
-        let _ = EnumWindows(
-            Some(enum_cb),
-            LPARAM(&mut state as *mut FindState as isize),
-        );
+        let _ = EnumWindows(Some(enum_cb), LPARAM(&mut state as *mut FindState as isize));
         if let Some(hwnd) = state.found_hwnd {
             let _ = ShowWindow(hwnd, SW_RESTORE);
             let _ = SetForegroundWindow(hwnd);
@@ -283,4 +290,143 @@ pub fn focus_external_window(title_substring: &str) -> bool {
         }
     }
     false
+}
+
+// ── Global Hotkey ─────────────────────────────────────────────────────────────
+
+use std::sync::Mutex as StdMutex;
+
+/// The live hotkey thread, so a preference change can be applied without a
+/// restart: only one thread may own the registration at a time.
+struct HotkeyState {
+    tx: std::sync::mpsc::Sender<(bool, String)>,
+    thread_id: u32,
+}
+
+static HOTKEY: StdMutex<Option<HotkeyState>> = StdMutex::new(None);
+
+/// Parse a shortcut string like "Ctrl+Shift+C" or "Alt+C" into (HOT_KEY_MODIFIERS, vk).
+///
+/// A shortcut with no modifier is refused: `RegisterHotKey` would then swallow a
+/// bare key system-wide, which is never what somebody wants from a toggle.
+fn parse_shortcut(s: &str) -> Option<(HOT_KEY_MODIFIERS, u32)> {
+    let mut mods = HOT_KEY_MODIFIERS(MOD_NOREPEAT.0);
+    let mut vk: Option<u32> = None;
+    let mut has_mod = false;
+
+    for part in s.split('+') {
+        let part = part.trim().to_uppercase();
+        match part.as_str() {
+            "CTRL" | "CONTROL" => {
+                mods |= MOD_CONTROL;
+                has_mod = true;
+            }
+            "ALT" | "OPTION" => {
+                mods |= MOD_ALT;
+                has_mod = true;
+            }
+            "SHIFT" => {
+                mods |= MOD_SHIFT;
+                has_mod = true;
+            }
+            "WIN" | "SUPER" | "META" => {
+                mods |= MOD_WIN;
+                has_mod = true;
+            }
+            "SPACE" => vk = Some(VK_SPACE.0 as u32),
+            "ESC" | "ESCAPE" => vk = Some(0x1B),
+            "ENTER" | "RETURN" => vk = Some(0x0D),
+            "TAB" => vk = Some(0x09),
+            p if p.len() == 1 => {
+                let ch = p.chars().next()?;
+                if ch.is_ascii_alphanumeric() {
+                    vk = Some(ch as u32);
+                }
+            }
+            p if p.starts_with('F') && p.len() >= 2 => {
+                if let Ok(num) = p[1..].parse::<u32>() {
+                    if (1..=24).contains(&num) {
+                        vk = Some(0x70 + num - 1);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !has_mod {
+        return None;
+    }
+    vk.map(|k| (mods, k))
+}
+
+/// Starts the hotkey thread. Safe to call once at boot; later changes go through
+/// `update_global_hotkey`.
+pub fn init_global_hotkey(app: AppHandle, enabled: bool, shortcut: String) {
+    let (tx, rx) = std::sync::mpsc::channel::<(bool, String)>();
+    let thread_id = unsafe { GetCurrentThreadId() };
+
+    std::thread::spawn(move || {
+        let mut registered: Option<i32> = None;
+        const HOTKEY_ID: i32 = 1010;
+
+        let mut apply = |en: bool, sc: &str| {
+            if let Some(id) = registered.take() {
+                unsafe {
+                    let _ = UnregisterHotKey(None, id);
+                }
+            }
+            if en {
+                if let Some((mods, vk)) = parse_shortcut(sc) {
+                    match unsafe { RegisterHotKey(None, HOTKEY_ID, mods, vk) } {
+                        Ok(()) => registered = Some(HOTKEY_ID),
+                        Err(err) => crate::log::line(format!("hotkey {sc} unavailable: {err}")),
+                    }
+                } else {
+                    crate::log::line(format!("hotkey {sc} could not be parsed"));
+                }
+            }
+        };
+
+        apply(enabled, &shortcut);
+
+        loop {
+            // Drain pending config changes first; a preference edit arrives as a
+            // channel message plus a wake-up post so this thread unblocks at once.
+            while let Ok((en, sc)) = rx.try_recv() {
+                apply(en, &sc);
+            }
+
+            // GetMessageW blocks with nothing to do, so an idle Coucou costs no CPU.
+            let mut msg = MSG::default();
+            unsafe {
+                if !GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                    break;
+                }
+            }
+            if msg.message == WM_HOTKEY {
+                // The island page owns what "toggle" means.
+                let _ = app.emit_to(WINDOW_LABEL, "hotkey-toggle", ());
+                continue;
+            }
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    });
+
+    *HOTKEY.lock().unwrap() = Some(HotkeyState { tx, thread_id });
+}
+
+/// Applies a preference change to the already-running hotkey thread.
+pub fn update_global_hotkey(enabled: bool, shortcut: &str) {
+    let guard = HOTKEY.lock().unwrap();
+    let Some(state) = guard.as_ref() else { return };
+    let _ = state.tx.send((enabled, shortcut.to_string()));
+    // The thread is parked inside GetMessageW; post a message so it wakes up and
+    // drains the channel now rather than at some arbitrary later press.
+    unsafe {
+        let _ = PostThreadMessageW(state.thread_id, WM_APP + 1, WPARAM(0), LPARAM(0));
+    }
 }

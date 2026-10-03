@@ -20,10 +20,40 @@ pub struct Settings {
     /// Defaulted explicitly so a settings.json written by an older build still loads.
     #[serde(default = "default_model")]
     pub model: String,
+    /// Global keyboard shortcut that opens/closes the island. Off by default:
+    /// a global hotkey is a machine-wide claim, and one nobody asked for can
+    /// collide with another app (or with Claude Code's own keys).
+    #[serde(default = "default_hotkey_enabled")]
+    pub hotkey_enabled: bool,
+    /// "Ctrl+Shift+C", "Alt+C", "Ctrl+Shift+Space", … Parsed by the OS layer.
+    #[serde(default = "default_hotkey")]
+    pub hotkey: String,
+    /// What a right-click on the island does: "toggle", "hide" or "none".
+    #[serde(default = "default_right_click_action")]
+    pub right_click_action: String,
+    /// What a middle-click on the island does: "toggle", "hide" or "none".
+    #[serde(default = "default_middle_click_action")]
+    pub middle_click_action: String,
 }
 
 fn default_model() -> String {
     crate::claude::DEFAULT_MODEL.to_string()
+}
+
+fn default_hotkey_enabled() -> bool {
+    false
+}
+
+fn default_hotkey() -> String {
+    "Ctrl+Shift+C".to_string()
+}
+
+fn default_right_click_action() -> String {
+    "toggle".to_string()
+}
+
+fn default_middle_click_action() -> String {
+    "hide".to_string()
 }
 
 impl Default for Settings {
@@ -43,6 +73,10 @@ impl Default for Settings {
             autostart: false,
             hooks_installed: false,
             model: default_model(),
+            hotkey_enabled: default_hotkey_enabled(),
+            hotkey: default_hotkey(),
+            right_click_action: default_right_click_action(),
+            middle_click_action: default_middle_click_action(),
         }
     }
 }

@@ -4,7 +4,7 @@
 
 import "./settings.css";
 import { Bridge, onEvent, type HookStatus } from "../core/bridge";
-import { DEFAULT_SETTINGS, type Settings } from "../core/state";
+import { DEFAULT_SETTINGS, type Settings, type MouseAction } from "../core/state";
 import { h, clear } from "../views/dom";
 
 let settings: Settings = { ...DEFAULT_SETTINGS };
@@ -417,6 +417,85 @@ function generalSection(): HTMLElement {
   );
 }
 
+// ── Controls section (shortcut + mouse gestures) ──────────────────────────────
+
+const HOTKEY_PRESETS: [string, string][] = [
+  ["Ctrl+Shift+C", "Ctrl + Shift + C"],
+  ["Ctrl+Alt+C", "Ctrl + Alt + C"],
+  ["Ctrl+Shift+Space", "Ctrl + Shift + Space"],
+  ["Alt+C", "Alt + C"],
+  ["Ctrl+Shift+N", "Ctrl + Shift + N"],
+  ["Ctrl+Shift+F12", "Ctrl + Shift + F12"],
+];
+
+function actionSelect(current: MouseAction, onChange: (v: MouseAction) => void): HTMLSelectElement {
+  const sel = h("select", {}) as HTMLSelectElement;
+  const options: [MouseAction, string][] = [
+    ["toggle", "Open / close"],
+    ["hide", "Close only"],
+    ["none", "Do nothing"],
+  ];
+  for (const [id, label] of options) sel.append(h("option", { value: id, text: label }));
+  sel.value = current;
+  sel.addEventListener("change", () => onChange(sel.value as MouseAction));
+  return sel;
+}
+
+function controlsSection(): HTMLElement {
+  // The shortcut row is only meaningful while the hotkey is on.
+  const hotkeyRow = h("div", { class: "row" });
+  const shortcutSelect = h("select", {}) as HTMLSelectElement;
+  for (const [id, label] of HOTKEY_PRESETS) shortcutSelect.append(h("option", { value: id, text: label }));
+  if (!HOTKEY_PRESETS.some(([id]) => id === settings.hotkey)) {
+    shortcutSelect.append(h("option", { value: settings.hotkey, text: settings.hotkey }));
+  }
+  shortcutSelect.value = settings.hotkey;
+  shortcutSelect.addEventListener("change", () => {
+    settings.hotkey = shortcutSelect.value;
+    void save();
+  });
+
+  const refreshHotkeyRow = () => {
+    clear(hotkeyRow);
+    if (settings.hotkeyEnabled) {
+      hotkeyRow.append(
+        h("label", { text: "Shortcut" }),
+        shortcutSelect,
+        h("span", { class: "hint", text: "presses this → open or close the island" }),
+      );
+    }
+  };
+
+  const hotkeyToggle = toggle(settings.hotkeyEnabled, (v) => {
+    settings.hotkeyEnabled = v;
+    refreshHotkeyRow();
+    void save();
+  });
+
+  refreshHotkeyRow();
+
+  return h(
+    "section",
+    {},
+    h("h2", {}, h("span", { text: "Controls" })),
+    h("div", { class: "hint", text: "Open or close the island without reaching for the top of the screen." }),
+    h("div", { class: "row" },
+      h("label", { text: "Keyboard shortcut" }),
+      hotkeyToggle,
+    ),
+    hotkeyRow,
+    h("div", { class: "row" },
+      h("label", { text: "Right-click island" }),
+      actionSelect(settings.rightClickAction, (v) => { settings.rightClickAction = v; void save(); }),
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Middle-click island" }),
+      actionSelect(settings.middleClickAction, (v) => { settings.middleClickAction = v; void save(); }),
+    ),
+    h("div", { class: "hint", text: "A click on the thin strip at the top of the screen always opens the island." }),
+  );
+}
+
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -444,6 +523,7 @@ async function main() {
     claudeSection(status),
     apiSection(hasKey),
     integrationsSection(present),
+    controlsSection(),
     generalSection(),
     h("div", {
       class: "hint",
