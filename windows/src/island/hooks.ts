@@ -42,6 +42,22 @@ function titleCase(slug: string): string {
     .join(" ");
 }
 
+/**
+ * Stop's `message` is the agent's answer and the finished card shows it as the
+ * title, so it is the one string worth formatting rather than dumping: collapse
+ * whitespace, cut on a word boundary, and mark the cut with an ellipsis. A hard
+ * `slice(0, 60)` (the macOS behaviour) chopped mid-word, which on a short answer
+ * like "Bridge hook jalan…" reads as a rendering bug rather than a truncation.
+ */
+function clipAnswer(text: string, limit = 60): string {
+  const clean = text.replace(/\s+/g, " ").trim();
+  if (clean.length <= limit) return clean;
+  const cut = clean.slice(0, limit);
+  const at = cut.lastIndexOf(" ");
+  const head = at > limit * 0.6 ? cut.slice(0, at) : cut;
+  return `${head.replace(/[.,;:!?—–-]+$/, "")}…`;
+}
+
 const FALLBACK_COLORS = ["#22C55E", "#EAB308", "#60A5FA", "#E879F9"];
 
 function agentColor(name: string): string {
@@ -242,13 +258,17 @@ function handleHook(island: Island, payload: HookPayload) {
 
     case "Stop":
       State.updateTask(agentId, "finished");
-      if (payload.message) State.appendStep(agentId, payload.message.slice(0, 60));
+      if (payload.message) State.appendStep(agentId, clipAnswer(payload.message));
       Sound.play("finish");
       if (focused) surface("finished", true);
       else State.setPillBadge(agentId, "finished");
       window.setTimeout(() => {
         if (isExternalAgent) {
-          State.removeTask(agentId);
+          // Only retire the card if this turn is still the one that finished: a
+          // new prompt within 5.2 s reuses the same task and must not be swept
+          // away by the previous turn's timer.
+          const t = State.tasks.find((x) => x.id === agentId);
+          if (t?.state === "finished") State.removeTask(agentId);
         } else {
           State.updateTask(agentId, "idle");
           State.setPillBadge(agentId, null);
@@ -263,9 +283,20 @@ function handleHook(island: Island, payload: HookPayload) {
       else State.setPillBadge(agentId, "error");
       break;
 
+    // An external agent's session usually ends right after its Stop (Hermes
+    // closes the turn ~100 ms later), and removing the task here deleted the
+    // finished card the moment it appeared — focus fell back to
+    // integration_claude, so the island re-rendered as "Claude Code finished"
+    // and the answer was gone. Give the Stop's card its full lifetime instead,
+    // exactly like the Stop arm's own timer does for Claude Code.
     case "SessionEnd":
       if (isExternalAgent) {
-        State.removeTask(agentId);
+        window.setTimeout(() => {
+          // Never retire a task a new turn is already driving: a session that
+          // restarted inside the window reuses the same agent_* task.
+          const t = State.tasks.find((x) => x.id === agentId);
+          if (t && t.state !== "thinking" && t.state !== "working") State.removeTask(agentId);
+        }, 5200);
       } else {
         State.updateTask(agentId, "idle");
         clearSession();
