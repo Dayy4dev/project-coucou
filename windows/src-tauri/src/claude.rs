@@ -21,6 +21,15 @@ const MAX_TOKENS: u32 = 4096;
 const MAX_INLINE_TEXT: u64 = 200_000;
 
 pub const DEFAULT_MODEL: &str = "claude-opus-5";
+/// Where an OpenAI-compatible provider is reached when the base URL is left
+/// empty. Anything that speaks `POST /chat/completions` fits: OpenAI, OpenRouter,
+/// Groq, Together, DeepSeek, Mistral, LM Studio, Ollama, vLLM, …
+pub const DEFAULT_OPENAI_BASE: &str = "https://api.openai.com/v1";
+pub const DEFAULT_OPENAI_MODEL: &str = "gpt-4o";
+/// The endpoint that lists models, relative to the provider's base URL.
+const OPENAI_MODELS_TAIL: &str = "models";
+const OPENAI_CHAT_TAIL: &str = "chat/completions";
+const ANTHROPIC_MODELS_URL: &str = "https://api.anthropic.com/v1/models?limit=100";
 
 const SYSTEM_PROMPT: &str = "You are Mochi, a personal AI assistant living at the top of the user's screen. \
 You have web search access and can help with absolutely anything — research, coding, finding places, recommendations, tasks, questions. \
@@ -75,16 +84,59 @@ pub struct ChatReply {
     pub text: String,
 }
 
-/// One chat turn. Returns the assistant's text, or a message the island shows
-/// in the note view.
+/// Which backend the chat talks to. Stored in settings.json as "anthropic" or
+/// "openai" — the latter meaning *any* OpenAI-compatible endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    #[default]
+    Anthropic,
+    Openai,
+}
+
+/// Everything a turn needs to reach the provider, assembled from Settings so
+/// the model/base URL can change between turns without a restart.
+#[derive(Debug, Clone)]
+pub struct ChatConfig {
+    pub provider: Provider,
+    pub model: String,
+    /// Only meaningful for `Provider::Openai`. Empty falls back to OpenAI itself.
+    pub base_url: String,
+}
+
+/// A model as the picker shows it. `label` is the human name when the API
+/// provides one, otherwise the id.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelInfo {
+    pub id: String,
+    pub label: String,
+}
+
+/// One chat turn, routed to whichever provider the settings select.
 pub async fn send(
     chat: &Chat,
-    model: &str,
+    config: &ChatConfig,
+    query: String,
+    context: Option<ChatContext>,
+) -> Result<ChatReply, String> {
+    match config.provider {
+        Provider::Anthropic => send_anthropic(chat, config, query, context).await,
+        Provider::Openai => send_openai(chat, config, query, context).await,
+    }
+}
+
+/// Anthropic Messages API: multi-turn, web search, files as document/image/text
+/// blocks. The history is kept in Anthropic block form, which is also the
+/// neutral shape the OpenAI path converts *from*.
+async fn send_anthropic(
+    chat: &Chat,
+    config: &ChatConfig,
     query: String,
     context: Option<ChatContext>,
 ) -> Result<ChatReply, String> {
     let key = secrets::get("anthropic-api-key")
-        .ok_or_else(|| "API key missing. Open settings.".to_string())?;
+        .ok_or_else(|| "Anthropic API key missing. Open settings.".to_string())?;
 
     let mut content: Vec<Value> = Vec::new();
 
@@ -117,7 +169,7 @@ pub async fn send(
     chat.push(json!({ "role": "user", "content": content }));
 
     let body = json!({
-        "model": model,
+        "model": config.model,
         "max_tokens": MAX_TOKENS,
         "system": SYSTEM_PROMPT,
         "tools": [{ "type": "web_search_20260209", "name": "web_search", "max_uses": 5 }],
@@ -153,19 +205,167 @@ pub async fn send(
     // next turn has the right context.
     chat.push(json!({ "role": "assistant", "content": blocks.clone() }));
 
-    let text = blocks
+    let text = text_of(&blocks);
+    if text.is_empty() {
+        return Err("No response text.".into());
+    }
+    Ok(ChatReply { text })
+}
+
+/// OpenAI-compatible Chat Completions: `POST {base}/chat/completions` with a
+/// bearer token. No tools — a compatible server may not offer web search, and
+/// silently dropping a requested tool is worse than not asking for one.
+async fn send_openai(
+    chat: &Chat,
+    config: &ChatConfig,
+    query: String,
+    context: Option<ChatContext>,
+) -> Result<ChatReply, String> {
+    // A local server (Ollama, LM Studio, vLLM) wants no Authorization header at
+    // all, so a missing entry is not an error here the way it is for Anthropic:
+    // no key simply means "send no bearer token". Cloud endpoints reject that
+    // with a 401, which the response below reports with the provider's wording.
+    let key = secrets::get("openai-api-key").unwrap_or_default();
+    let key = key.trim();
+
+    let mut parts: Vec<Value> = Vec::new();
+    if chat.is_empty() {
+        match &context {
+            Some(ChatContext::File { name, path }) => {
+                if let Some(block) = file_block(path) {
+                    parts.push(block);
+                }
+                parts.push(json!({ "type": "text", "text": format!("File: {name}") }));
+            }
+            Some(ChatContext::Window {
+                app_name,
+                title,
+                url,
+            }) => {
+                let mut text = format!("Context — App: {app_name}, Window: {title}");
+                if let Some(url) = url {
+                    text.push_str(&format!(", URL: {url}"));
+                }
+                parts.push(json!({ "type": "text", "text": text }));
+            }
+            None => {}
+        }
+    }
+    parts.push(json!({ "type": "text", "text": query }));
+
+    chat.push(json!({ "role": "user", "content": parts }));
+
+    let messages = to_openai_messages(&chat.snapshot());
+
+    let body = json!({
+        "model": config.model,
+        "max_tokens": MAX_TOKENS,
+        "messages": messages,
+    });
+
+    let url = format!("{}/{}", base_url(config), OPENAI_CHAT_TAIL);
+    let response = match call_openai(&url, key, &body).await {
+        Ok(v) => v,
+        Err(err) => {
+            chat.pop();
+            return Err(err);
+        }
+    };
+
+    let text = response
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|c| c.first())
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    if text.is_empty() {
+        chat.pop();
+        return Err("No response text.".into());
+    }
+
+    chat.push(json!({ "role": "assistant", "content": [{ "type": "text", "text": text }] }));
+    Ok(ChatReply { text })
+}
+
+/// The provider's base URL, without a trailing slash, defaulting to OpenAI.
+fn base_url(config: &ChatConfig) -> String {
+    let raw = config.base_url.trim();
+    let raw = if raw.is_empty() {
+        DEFAULT_OPENAI_BASE
+    } else {
+        raw
+    };
+    raw.trim_end_matches('/').to_string()
+}
+
+/// Pull the visible text out of a block array (shared by both providers).
+fn text_of(blocks: &[Value]) -> String {
+    blocks
         .iter()
         .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
         .filter_map(|b| b.get("text").and_then(Value::as_str))
         .collect::<Vec<_>>()
         .join("\n")
         .trim()
-        .to_string();
+        .to_string()
+}
 
-    if text.is_empty() {
-        return Err("No response text.".into());
+/// Neutral history (Anthropic blocks) → OpenAI messages. Text blocks are joined
+/// into one string; images become `image_url` data URLs so vision models see
+/// them; documents (PDFs) are dropped — the `File:` text block already names the
+/// file, and not every compatible server accepts a PDF part.
+fn to_openai_messages(history: &[Value]) -> Vec<Value> {
+    let mut out = vec![json!({ "role": "system", "content": SYSTEM_PROMPT })];
+    for message in history {
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("user");
+        let content = message.get("content");
+        match content.and_then(Value::as_array) {
+            Some(blocks) => {
+                let mut texts: Vec<String> = Vec::new();
+                let mut images: Vec<Value> = Vec::new();
+                for b in blocks {
+                    match b.get("type").and_then(Value::as_str) {
+                        Some("text") => {
+                            if let Some(t) = b.get("text").and_then(Value::as_str) {
+                                texts.push(t.to_string());
+                            }
+                        }
+                        Some("image") => {
+                            if let Some(src) = b.get("source") {
+                                let media = src
+                                    .get("media_type")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("image/png");
+                                let data = src.get("data").and_then(Value::as_str).unwrap_or("");
+                                images.push(json!({
+                                    "type": "image_url",
+                                    "image_url": { "url": format!("data:{media};base64,{data}") },
+                                }));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let text = texts.join("\n\n");
+                if images.is_empty() {
+                    out.push(json!({ "role": role, "content": text }));
+                } else {
+                    let mut parts: Vec<Value> = vec![json!({ "type": "text", "text": text })];
+                    parts.extend(images);
+                    out.push(json!({ "role": role, "content": parts }));
+                }
+            }
+            None => {
+                let text = content.and_then(Value::as_str).unwrap_or("").to_string();
+                out.push(json!({ "role": role, "content": text }));
+            }
+        }
     }
-    Ok(ChatReply { text })
+    out
 }
 
 async fn call(key: &str, body: &Value) -> Result<Value, String> {
@@ -189,18 +389,167 @@ async fn call(key: &str, body: &Value) -> Result<Value, String> {
     let text = response.text().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
         // Surface the API's own message, which is what makes a bad key obvious.
-        let detail = serde_json::from_str::<Value>(&text)
-            .ok()
-            .and_then(|v| {
-                v.get("error")
-                    .and_then(|e| e.get("message"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-            .unwrap_or_else(|| text.chars().take(200).collect());
-        return Err(format!("Claude API {status}: {detail}"));
+        return Err(format!("Claude API {status}: {}", error_detail(&text)));
     }
     serde_json::from_str(&text).map_err(|e| format!("Bad API response: {e}"))
+}
+
+/// `POST {url}` with an optional bearer token — an empty key means "no
+/// Authorization header", which is what local servers expect.
+async fn call_openai(url: &str, key: &str, body: &Value) -> Result<Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(90))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut request = client
+        .post(url)
+        .header("content-type", "application/json")
+        .json(body);
+    if !key.trim().is_empty() {
+        request = request.bearer_auth(key.trim());
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+
+    let status = response.status();
+    let text = response.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("Provider API {status}: {}", error_detail(&text)));
+    }
+    serde_json::from_str(&text).map_err(|e| format!("Bad API response: {e}"))
+}
+
+/// The provider's own `error.message`, else the first 200 characters of the body.
+fn error_detail(text: &str) -> String {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| text.chars().take(200).collect())
+}
+
+/// Lists the models a provider offers, for the picker in Settings. Anthropic
+/// returns display names; OpenAI-compatible servers usually return bare ids.
+/// A missing key or a failed request comes back as an error message the
+/// settings window can show next to the field it belongs to.
+pub async fn fetch_models(config: &ChatConfig) -> Result<Vec<ModelInfo>, String> {
+    match config.provider {
+        Provider::Anthropic => fetch_anthropic_models().await,
+        Provider::Openai => {
+            let key = secrets::get("openai-api-key").unwrap_or_default();
+            let url = format!("{}/{}", base_url(config), OPENAI_MODELS_TAIL);
+            fetch_openai_models(&url, &key).await
+        }
+    }
+}
+
+async fn fetch_anthropic_models() -> Result<Vec<ModelInfo>, String> {
+    let key = secrets::get("anthropic-api-key")
+        .ok_or_else(|| "Anthropic API key missing. Open settings.".to_string())?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let response = client
+        .get(ANTHROPIC_MODELS_URL)
+        .header("x-api-key", key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+
+    let status = response.status();
+    let text = response.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("Claude API {status}: {}", error_detail(&text)));
+    }
+    let value: Value =
+        serde_json::from_str(&text).map_err(|e| format!("Bad API response: {e}"))?;
+    let items = value
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(items
+        .iter()
+        .filter_map(|item| {
+            let id = item.get("id").and_then(Value::as_str)?.to_string();
+            let label = item
+                .get("display_name")
+                .and_then(Value::as_str)
+                .unwrap_or(&id)
+                .to_string();
+            Some(ModelInfo { id, label })
+        })
+        .collect())
+}
+
+async fn fetch_openai_models(url: &str, key: &str) -> Result<Vec<ModelInfo>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut request = client.get(url);
+    if !key.trim().is_empty() {
+        request = request.bearer_auth(key.trim());
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+
+    let status = response.status();
+    let text = response.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("Provider API {status}: {}", error_detail(&text)));
+    }
+    let value: Value =
+        serde_json::from_str(&text).map_err(|e| format!("Bad API response: {e}"))?;
+    let items = value
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    // Drop the families a chat picker can never offer: embeddings, audio,
+    // transcription, image/video generation, moderation.
+    const EXCLUDED: &[&str] = &[
+        "embed", "tts", "stt", "whisper", "dall-e", "audio", "realtime", "moderat", "image",
+        "sora", "video", "transcribe",
+    ];
+    let mut models: Vec<(i64, ModelInfo)> = items
+        .iter()
+        .filter_map(|item| {
+            let id = item.get("id").and_then(Value::as_str)?.to_string();
+            let lower = id.to_lowercase();
+            if EXCLUDED.iter().any(|x| lower.contains(x)) {
+                return None;
+            }
+            let created = item.get("created").and_then(Value::as_i64).unwrap_or(0);
+            Some((
+                created,
+                ModelInfo {
+                    label: id.clone(),
+                    id,
+                },
+            ))
+        })
+        .collect();
+    // Newest first, like macOS — but a server that reports no timestamps keeps
+    // its own order, which is usually curated.
+    if models.iter().any(|(c, _)| *c > 0) {
+        models.sort_by(|a, b| b.0.cmp(&a.0));
+    }
+    Ok(models.into_iter().map(|(_, m)| m).collect())
 }
 
 /// PDF → document block, image → image block, text/code → inline text.

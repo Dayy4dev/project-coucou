@@ -20,7 +20,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
-use claude::{Chat, ChatContext, ChatReply};
+use claude::{Chat, ChatConfig, ChatContext, ChatReply, ModelInfo, Provider};
 use files::DroppedFile;
 use hooks::{HookPreview, HookStatus};
 use island::{PollGate, ScreenInfo};
@@ -273,8 +273,49 @@ async fn chat_send(
     query: String,
     context: Option<ChatContext>,
 ) -> Result<ChatReply, String> {
-    let model = shared.settings.lock().unwrap().model.clone();
-    claude::send(&chat, &model, query, context).await
+    let config = chat_config(&shared);
+    claude::send(&chat, &config, query, context).await
+}
+
+/// Reads the chat provider out of the live settings, so switching provider or
+/// model in the settings window takes effect on the very next turn.
+fn chat_config(shared: &Shared) -> ChatConfig {
+    let settings = shared.settings.lock().unwrap();
+    let provider = match settings.chat_provider.as_str() {
+        "openai" => Provider::Openai,
+        _ => Provider::Anthropic,
+    };
+    let model = match provider {
+        Provider::Anthropic => settings.model.clone(),
+        Provider::Openai => settings.openai_model.clone(),
+    };
+    ChatConfig {
+        provider,
+        model,
+        base_url: settings.openai_base_url.clone(),
+    }
+}
+
+/// Lists the models the configured provider offers, for the settings picker.
+/// `provider`/`base_url` override the saved settings so the list can be fetched
+/// for a provider the user is only *considering* — before anything is saved.
+#[tauri::command]
+async fn fetch_models(
+    shared: State<'_, Shared>,
+    provider: Option<String>,
+    base_url: Option<String>,
+) -> Result<Vec<ModelInfo>, String> {
+    let mut config = chat_config(&shared);
+    if let Some(provider) = provider {
+        config.provider = match provider.as_str() {
+            "openai" => Provider::Openai,
+            _ => Provider::Anthropic,
+        };
+    }
+    if let Some(base_url) = base_url {
+        config.base_url = base_url;
+    }
+    claude::fetch_models(&config).await
 }
 
 #[tauri::command]
@@ -429,6 +470,7 @@ pub fn run() {
             log_line,
             chat_send,
             chat_reset,
+            fetch_models,
             ingest_file,
             secret_present,
             secret_set,

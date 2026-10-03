@@ -20,6 +20,15 @@ pub struct Settings {
     /// Defaulted explicitly so a settings.json written by an older build still loads.
     #[serde(default = "default_model")]
     pub model: String,
+    /// Which backend answers chat: "anthropic" (default) or "openai" (compatible).
+    #[serde(default = "default_chat_provider")]
+    pub chat_provider: String,
+    /// Base URL for `chat_provider == "openai"`. Empty falls back to OpenAI itself.
+    #[serde(default = "default_openai_base_url")]
+    pub openai_base_url: String,
+    /// Model name passed to an OpenAI-compatible endpoint.
+    #[serde(default = "default_openai_model")]
+    pub openai_model: String,
     /// Global keyboard shortcut that opens/closes the island. Off by default:
     /// a global hotkey is a machine-wide claim, and one nobody asked for can
     /// collide with another app (or with Claude Code's own keys).
@@ -38,6 +47,18 @@ pub struct Settings {
 
 fn default_model() -> String {
     crate::claude::DEFAULT_MODEL.to_string()
+}
+
+fn default_chat_provider() -> String {
+    "anthropic".to_string()
+}
+
+fn default_openai_base_url() -> String {
+    crate::claude::DEFAULT_OPENAI_BASE.to_string()
+}
+
+fn default_openai_model() -> String {
+    crate::claude::DEFAULT_OPENAI_MODEL.to_string()
 }
 
 fn default_hotkey_enabled() -> bool {
@@ -73,6 +94,9 @@ impl Default for Settings {
             autostart: false,
             hooks_installed: false,
             model: default_model(),
+            chat_provider: default_chat_provider(),
+            openai_base_url: default_openai_base_url(),
+            openai_model: default_openai_model(),
             hotkey_enabled: default_hotkey_enabled(),
             hotkey: default_hotkey(),
             right_click_action: default_right_click_action(),

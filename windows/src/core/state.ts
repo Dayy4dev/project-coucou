@@ -100,8 +100,14 @@ export interface Settings {
   screen: "primary" | "cursor";
   autostart: boolean;
   hooksInstalled: boolean;
-  /** Claude model used by the chat. */
+  /** Claude model used by the chat when the provider is Anthropic. */
   model: string;
+  /** Which backend answers chat: Anthropic, or any OpenAI-compatible endpoint. */
+  chatProvider: ChatProvider;
+  /** Base URL for the OpenAI-compatible provider. Empty falls back to OpenAI. */
+  openaiBaseUrl: string;
+  /** Model name sent to the OpenAI-compatible endpoint. */
+  openaiModel: string;
   /** Global keyboard shortcut that opens/closes the island. */
   hotkeyEnabled: boolean;
   /** e.g. "Ctrl+Shift+C", "Alt+C", "Ctrl+Shift+Space". */
@@ -110,6 +116,14 @@ export interface Settings {
   rightClickAction: MouseAction;
   /** What a middle-click on the island does. */
   middleClickAction: MouseAction;
+}
+
+export type ChatProvider = "anthropic" | "openai";
+
+/** A model the provider reports, as the settings picker shows it. */
+export interface ModelInfo {
+  id: string;
+  label: string;
 }
 
 /** A mouse gesture on the island: toggle it, only close it, or do nothing. */
@@ -127,6 +141,9 @@ export const DEFAULT_SETTINGS: Settings = {
   autostart: false,
   hooksInstalled: false,
   model: "claude-opus-5",
+  chatProvider: "anthropic",
+  openaiBaseUrl: "https://api.openai.com/v1",
+  openaiModel: "gpt-4o",
   // A global hotkey is a machine-wide claim: off until the user asks for it.
   hotkeyEnabled: false,
   hotkey: "Ctrl+Shift+C",

@@ -5,7 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import type { Settings } from "./state";
+import type { ChatProvider, ModelInfo, Settings } from "./state";
 
 export const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -93,6 +93,12 @@ export const Bridge = {
   chatSend: (query: string, context: ChatContext | null) =>
     callOrThrow<{ text: string }>("chat_send", { query, context }),
   chatReset: () => call<void>("chat_reset"),
+  /**
+   * Models the provider offers, for the picker. `provider`/`baseUrl` override
+   * the saved settings, so a candidate provider can be listed before saving.
+   */
+  fetchModels: (provider?: ChatProvider, baseUrl?: string) =>
+    callOrThrow<ModelInfo[]>("fetch_models", { provider, baseUrl }),
   /** Copies a dropped file into the inbox. */
   ingestFile: (path: string) => callOrThrow<DroppedFile>("ingest_file", { path }),
   /** Only ever tells you whether a key exists — never its value. */
