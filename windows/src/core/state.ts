@@ -7,7 +7,7 @@ export type AgentSource = "claudeCode" | "n8n" | "agent";
 export type PillBadge = "approval" | "finished" | "error";
 
 /** Views that describe one task's outcome and must not outlive that task. */
-const ALERT_VIEWS: ReadonlySet<IslandViewName> = new Set(["approval", "question", "error", "finished"]);
+export const ALERT_VIEWS: ReadonlySet<IslandViewName> = new Set(["approval", "question", "error", "finished"]);
 
 export interface AgentTask {
   id: string;

@@ -5,7 +5,7 @@
 
 import { Bridge, onEvent } from "../core/bridge";
 import { Sound } from "../core/sound";
-import { State } from "../core/state";
+import { ALERT_VIEWS, State } from "../core/state";
 import type { Island } from "./island";
 
 const CLAUDE_ID = "integration_claude";
@@ -184,7 +184,28 @@ function handleHook(island: Island, payload: HookPayload) {
   const agentId = validAgent ? `agent_${validAgent}` : CLAUDE_ID;
   const isExternalAgent = validAgent !== null;
 
-  const focused = State.focusId === agentId;
+  // Default selection: this setup's agent owns the island. Any Hermes event
+  // takes the focus, so the card on screen is its own rather than the VS Code
+  // pill's — upsertExternalAgent alone never could, because focusId has been
+  // "integration_claude" since boot. Three exceptions: a permission card already
+  // waiting for a decision keeps focus (its only exit is a human click), a new
+  // Claude Code PermissionRequest claims it back (that card is the only place its
+  // approval can happen), and SessionEnd never claims focus because its task is
+  // about to retire. A pill click still wins until the next event.
+  const claimFocus = () => {
+    if (State.pendingApproval) return;
+    if (isExternalAgent) {
+      if (name === "SessionEnd" || State.focusId === agentId) return;
+      // setFocus is a no-op until the pill exists, so this runs after
+      // ensurePill() below rather than before it.
+      State.setFocus(agentId);
+      // A stale alert card belongs to the task we just left; do not relabel it
+      // with the new focus ("Hermes finished" over a turn still working).
+      if (ALERT_VIEWS.has(State.view)) State.view = State.defaultView();
+    } else if (name === "PermissionRequest" && State.focusId !== CLAUDE_ID) {
+      State.setFocus(CLAUDE_ID);
+    }
+  };
 
   /** Alerts force the island open; work events only reveal the compact island. */
   const surface = (view: Parameters<Island["alert"]>[0], isAlert: boolean) => {
@@ -197,7 +218,7 @@ function handleHook(island: Island, payload: HookPayload) {
     }
   };
 
-  /** Ensure the agent pill exists (no-op for Claude Code). */
+  /** Ensure the agent pill exists (no-op for Claude Code), then take the focus. */
   const ensurePill = () => {
     if (isExternalAgent) {
       // The tag is a lowercase slug ("hermes") because that is what validateAgent
@@ -206,7 +227,11 @@ function handleHook(island: Island, payload: HookPayload) {
     } else {
       upsert(projectName, cwd);
     }
+    claimFocus();
   };
+
+  /** Read at the point of use: claimFocus() may have moved the focus above. */
+  const isFocused = () => State.focusId === agentId;
 
   switch (name) {
     case "SessionStart":
@@ -260,7 +285,7 @@ function handleHook(island: Island, payload: HookPayload) {
       State.updateTask(agentId, "finished");
       if (payload.message) State.appendStep(agentId, clipAnswer(payload.message));
       Sound.play("finish");
-      if (focused) surface("finished", true);
+      if (isFocused()) surface("finished", true);
       else State.setPillBadge(agentId, "finished");
       window.setTimeout(() => {
         if (isExternalAgent) {
@@ -279,7 +304,7 @@ function handleHook(island: Island, payload: HookPayload) {
     case "StopFailure":
       State.updateTask(agentId, "error");
       Sound.play("error");
-      if (focused) surface("error", true);
+      if (isFocused()) surface("error", true);
       else State.setPillBadge(agentId, "error");
       break;
 
@@ -328,7 +353,9 @@ function handleHook(island: Island, payload: HookPayload) {
         if (requestId) void Bridge.approvalDecline(requestId);
         break;
       }
-      upsert(projectName, cwd);
+      // ensurePill() rather than upsert(): the focus must land on the VS Code
+      // pill before this card renders, or it shows whoever held focus instead.
+      ensurePill();
       if (pendingTimeout != null) window.clearTimeout(pendingTimeout);
       const tool = payload.tool_name ?? "Tool";
       const input = payload.tool_input ?? {};
@@ -344,7 +371,7 @@ function handleHook(island: Island, payload: HookPayload) {
       State.updateTask(CLAUDE_ID, "approval");
       State.isPinned = true;
       Sound.play("approval");
-      if (focused) {
+      if (isFocused()) {
         island.alert("approval");
       } else {
         // Another agent holds the view, so the card would yank it away. The badge
